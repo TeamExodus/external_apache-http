@@ -39,6 +39,7 @@ import java.net.URISyntaxException;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.TimeUnit;
+import javax.net.ssl.SSLSession;
 
 import org.apache.commons.logging.Log;
 import org.apache.commons.logging.LogFactory;
@@ -57,6 +58,7 @@ import org.apache.http.auth.AuthScope;
 import org.apache.http.auth.AuthState;
 import org.apache.http.auth.AuthenticationException;
 import org.apache.http.auth.Credentials;
+import org.apache.http.auth.UsernamePasswordCredentials;
 import org.apache.http.auth.MalformedChallengeException;
 import org.apache.http.client.AuthenticationHandler;
 import org.apache.http.client.RequestDirector;
@@ -94,6 +96,8 @@ import org.apache.http.protocol.HTTP;
 import org.apache.http.protocol.HttpContext;
 import org.apache.http.protocol.HttpProcessor;
 import org.apache.http.protocol.HttpRequestExecutor;
+import org.apache.http.impl.auth.DigestScheme;
+
 
 /**
  * Default implementation of {@link RequestDirector}.
@@ -134,19 +138,19 @@ public class DefaultRequestDirector implements RequestDirector {
 
     /** The HTTP protocol processor. */
     protected final HttpProcessor httpProcessor;
-    
+
     /** The request retry handler. */
     protected final HttpRequestRetryHandler retryHandler;
-    
+
     /** The redirect handler. */
     protected final RedirectHandler redirectHandler;
-    
+
     /** The target authentication handler. */
     private final AuthenticationHandler targetAuthHandler;
-    
+
     /** The proxy authentication handler. */
     private final AuthenticationHandler proxyAuthHandler;
-    
+
     /** The user token handler. */
     private final UserTokenHandler userTokenHandler;
     
@@ -917,13 +921,12 @@ public class DefaultRequestDirector implements RequestDirector {
                                            HttpResponse response,
                                            HttpContext context)
         throws HttpException, IOException {
-
         HttpRoute route = roureq.getRoute();
         HttpHost proxy = route.getProxyHost();
         RequestWrapper request = roureq.getRequest();
-        
+
         HttpParams params = request.getParams();
-        if (HttpClientParams.isRedirecting(params) && 
+        if (HttpClientParams.isRedirecting(params) &&
                 this.redirectHandler.isRedirectRequested(response, context)) {
 
             if (redirectCount >= maxRedirects) {
@@ -933,6 +936,21 @@ public class DefaultRequestDirector implements RequestDirector {
             redirectCount++;
             
             URI uri = this.redirectHandler.getLocationURI(response, context);
+
+            /*
+             * When SIM reaches zero balance all http traffic gets redirected
+             * to recharge url and all traffic need to be blocked.
+             * So redirect count is maintained.
+             * If feature is disabled or data traffic is already blocked
+             * no need to check for redirection.
+             */
+            if (ZeroBalanceHelperClass.getFeatureFlagValue() &&
+                    (!ZeroBalanceHelperClass.getBackgroundDataProperty())) {
+                Header locationHeader = response.getFirstHeader("location");
+                String location = locationHeader.getValue();
+                ZeroBalanceHelperClass.setHttpRedirectCount(location);
+                this.log.error("zerobalance::Apachehttp:Redirect count set " );
+            }
 
             HttpHost newTarget = new HttpHost(
                     uri.getHost(), 
@@ -984,9 +1002,23 @@ public class DefaultRequestDirector implements RequestDirector {
                     }
                 }
                 updateAuthState(this.targetAuthState, target, credsProvider);
-                
+
                 if (this.targetAuthState.getCredentials() != null) {
                     // Re-try the same request via the same route
+                    AuthScheme authScheme = this.targetAuthState.getAuthScheme();
+                    if (authScheme instanceof DigestScheme) {
+                        String ciphersuite = "invalid";
+                        if(managedConn != null) {
+                            SSLSession session = managedConn.getSSLSession();
+                            if(session != null){
+                                ciphersuite = session.getCipherSuite();
+                                this.log.debug("cs="+ciphersuite);
+                            }else{
+                                this.log.debug("socket is not ssl");
+                            }
+                        }
+                        ((DigestScheme)authScheme).setSSLCipherSuite(ciphersuite);
+                    }
                     return roureq;
                 } else {
                     return null;
@@ -1110,7 +1142,11 @@ public class DefaultRequestDirector implements RequestDirector {
         }
         Credentials creds = authState.getCredentials();
         if (creds == null) {
-            creds = credsProvider.getCredentials(authScope);
+            if (authScheme.isGbaScheme()) {
+                creds = new UsernamePasswordCredentials("user:pw");
+            } else {
+                creds = credsProvider.getCredentials(authScope);
+            }
             if (this.log.isDebugEnabled()) {
                 if (creds != null) {
                     this.log.debug("Found credentials");
