@@ -203,9 +203,9 @@ public class DigestScheme extends RFC2617Scheme {
         String delim = "[@]";
         String[] words = s.split(delim);
         boolean rv = false;
-        if(words[0].startsWith(gbaToken)){
+        if(words[0].equals(gbaToken)){
             rv = true;
-            nafName = new String(s);
+            nafName = new String(words[1]);
         }
         this.log.debug("realm:"+words[0]+","+words[1]);
         return rv;
